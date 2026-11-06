@@ -1,18 +1,20 @@
 
-name: Compilar aplicativo Android
+name: Compilar Zalith Launcher 2
 
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Gerar APK
+    name: Gerar APK Android
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
       - name: Baixar código-fonte
@@ -20,21 +22,36 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Verificar projeto
+      - name: Localizar projeto Gradle
+        shell: bash
         run: |
-          echo "Verificando arquivos do projeto..."
-          test -f gradlew || {
-            echo "ERRO: gradlew não encontrado na raiz."
+          echo "Procurando o código-fonte..."
+
+          GRADLEW=$(find . -type f -name gradlew \
+            -not -path '*/.gradle/*' -print -quit)
+
+          if [ -z "$GRADLEW" ]; then
+            echo "::error::gradlew não encontrado. Envie o código-fonte completo do Zalith Launcher 2."
+            echo "Arquivos encontrados na raiz:"
+            ls -la
             exit 1
-          }
-          test -d ZalithLauncher || {
-            echo "ERRO: módulo ZalithLauncher não encontrado."
+          fi
+
+          PROJECT_DIR=$(dirname "$GRADLEW")
+
+          if [ ! -f "$PROJECT_DIR/settings.gradle.kts" ] && \
+             [ ! -f "$PROJECT_DIR/settings.gradle" ]; then
+            echo "::error::settings.gradle não encontrado junto ao gradlew."
             exit 1
-          }
-          chmod +x gradlew
+          fi
+
+          echo "Projeto localizado em: $PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          chmod +x "$GRADLEW"
 
       - name: Configurar Java 21
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
@@ -42,17 +59,38 @@ jobs:
       - name: Configurar Gradle
         uses: gradle/actions/setup-gradle@v5
 
-      - name: Compilar APK Debug
+      - name: Preparar Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Compilar APK
+        shell: bash
         run: |
+          cd "$PROJECT_DIR"
+
           ./gradlew ZalithLauncher:assembleDebug \
             -Darch=all \
+            --no-daemon \
             --stacktrace
 
-      - name: Publicar APK
+      - name: Verificar APK
+        shell: bash
+        run: |
+          find "$PROJECT_DIR" -type f \
+            -path '*/build/outputs/apk/debug/*.apk' \
+            -print
+
+          if ! find "$PROJECT_DIR" -type f \
+            -path '*/build/outputs/apk/debug/*.apk' \
+            -print -quit | grep -q .; then
+            echo "::error::Nenhum APK foi gerado."
+            exit 1
+          fi
+
+      - name: Disponibilizar APK
         uses: actions/upload-artifact@v4
         with:
-          name: Android-APK-Debug
-          path: ZalithLauncher/build/outputs/apk/debug/*.apk
+          name: ZalithLauncher2-APK
+          path: '**/build/outputs/apk/debug/*.apk'
           if-no-files-found: error
           retention-days: 14
           
