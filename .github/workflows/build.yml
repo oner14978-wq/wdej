@@ -30,8 +30,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Procurando as 18 partes do projeto..."
-
           python3 - <<'PY'
           import os
           import re
@@ -44,10 +42,12 @@ jobs:
 
               if match:
                   number = int(match.group(1))
+
                   if 1 <= number <= 18:
                       if number in parts:
                           print("Parte duplicada:", number)
                           sys.exit(1)
+
                       parts[number] = name
 
           missing = [
@@ -62,11 +62,11 @@ jobs:
           for i in range(1, 19):
               print(f"{i:03d}: {parts[i]}")
 
-          print("Todas as partes foram encontradas.")
+          print("Todas as 18 partes foram encontradas.")
           PY
 
       # ==========================================
-      # 3. RECONSTRUIR E EXTRAIR O ZIP
+      # 3. RECONSTRUIR O ZIP
       # ==========================================
 
       - name: Reconstruir arquivo ZIP original
@@ -89,6 +89,7 @@ jobs:
 
               if match:
                   number = int(match.group(1))
+
                   if 1 <= number <= 18:
                       parts[number] = name
 
@@ -97,29 +98,32 @@ jobs:
           with open(output, "wb") as result:
               for number in range(1, 19):
                   filename = parts[number]
+
                   print("Reconstruindo:", filename)
 
                   with open(filename, "rb") as part:
                       while True:
                           data = part.read(1024 * 1024)
+
                           if not data:
                               break
+
                           result.write(data)
 
           if not zipfile.is_zipfile(output):
-              print("ERRO: arquivo reconstruído não é ZIP válido.")
+              print("ERRO: ZIP reconstruído inválido.")
               sys.exit(1)
 
           with zipfile.ZipFile(output) as archive:
-              bad = archive.testzip()
+              bad_file = archive.testzip()
 
-              if bad:
-                  print("Arquivo corrompido:", bad)
+              if bad_file:
+                  print("ZIP corrompido:", bad_file)
                   sys.exit(1)
 
               archive.extractall("extracted")
 
-          print("ZIP reconstruído e extraído.")
+          print("Projeto extraído com sucesso.")
           PY
 
       # ==========================================
@@ -130,8 +134,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "Procurando gradlew..."
 
           GRADLEW=$(find extracted -type f -name gradlew -print -quit)
 
@@ -153,13 +155,13 @@ jobs:
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Diretório do projeto:"
+          echo "Projeto localizado:"
           echo "$PROJECT_DIR"
 
           ls -la "$PROJECT_DIR"
 
       # ==========================================
-      # 5. INSTALAR JAVA 21
+      # 5. INSTALAR JAVA
       # ==========================================
 
       - name: Instalar Java 21
@@ -169,7 +171,7 @@ jobs:
           java-version: '21'
 
       # ==========================================
-      # 6. INSTALAR ANDROID SDK COMMAND-LINE 16.0
+      # 6. INSTALAR ANDROID COMMAND-LINE TOOLS 16.0
       # ==========================================
 
       - name: Instalar Android SDK Command-line Tools 16.0
@@ -199,8 +201,6 @@ jobs:
             exit 1
           fi
 
-          echo "Substituindo ferramentas antigas..."
-
           rm -rf "$SDK_ROOT/cmdline-tools/latest"
 
           mv "$TEMP_DIR/cmdline-tools" \
@@ -225,10 +225,10 @@ jobs:
             --licenses || true
 
       # ==========================================
-      # 7. DETECTAR E INSTALAR COMPILE SDK
+      # 7. INSTALAR ANDROID PLATFORM 37.2 E NDK
       # ==========================================
 
-      - name: Detectar e instalar plataforma Android do projeto
+      - name: Instalar Android Platform 37.2 e NDK
         shell: bash
         run: |
           set -euo pipefail
@@ -236,77 +236,47 @@ jobs:
           SDK_ROOT="/usr/local/lib/android/sdk"
           SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
 
-          echo "Detectando compileSdk nos arquivos Gradle..."
+          echo "Consultando pacotes oficiais..."
 
-          COMPILE_SDK=$(python3 - "$PROJECT_DIR" <<'PY'
-          import os
-          import re
-          import sys
+          "$SDKMANAGER" \
+            --sdk_root="$SDK_ROOT" \
+            --list > "$RUNNER_TEMP/android-packages.txt"
 
-          root = sys.argv[1]
-          found = []
+          echo "Verificando Android Platform 37.2..."
 
-          patterns = [
-              r'\bcompileSdk(?:Version)?\s*(?:=\s*)?["\']?(\d+)',
-              r'\bcompileSdkPreview\s*(?:=\s*)?["\']([^"\']+)'
-          ]
+          if ! grep -Fq "platforms;android-37.2" \
+            "$RUNNER_TEMP/android-packages.txt"; then
 
-          for base, dirs, files in os.walk(root):
-              dirs[:] = [
-                  d for d in dirs
-                  if d not in (".git", ".gradle", "build")
-              ]
+            echo "ERRO: Android Platform 37.2 não está disponível."
+            echo "Pacotes Android 37 encontrados:"
+            grep -F "platforms;android-37" \
+              "$RUNNER_TEMP/android-packages.txt" || true
+            exit 1
+          fi
 
-              for name in files:
-                  if name.endswith((".gradle", ".gradle.kts")):
-                      path = os.path.join(base, name)
+          echo "Android Platform 37.2 encontrada."
 
-                      try:
-                          with open(path, encoding="utf-8") as f:
-                              content = f.read()
-                      except Exception:
-                          continue
-
-                      for pattern in patterns:
-                          for match in re.findall(pattern, content):
-                              if isinstance(match, str) and match.isdigit():
-                                  found.append(int(match))
-
-          if not found:
-              print(
-                  "Não foi possível detectar compileSdk nos arquivos Gradle.",
-                  file=sys.stderr
-              )
-              sys.exit(1)
-
-          version = max(found)
-
-          print("Compile SDK principal detectado:", version,
-                file=sys.stderr)
-
-          print(version)
-          PY
-          )
-
-          echo "Compile SDK principal: $COMPILE_SDK"
-
-          echo "Instalando plataforma Android $COMPILE_SDK..."
+          echo "Instalando componentes..."
 
           "$SDKMANAGER" \
             --sdk_root="$SDK_ROOT" \
             "platform-tools" \
-            "platforms;android-$COMPILE_SDK"
+            "platforms;android-37.2" \
+            "ndk;25.2.9519653"
 
-          echo "Verificando plataforma instalada..."
+          echo "Verificando instalação..."
 
-          if [ ! -d "$SDK_ROOT/platforms/android-$COMPILE_SDK" ]; then
-            echo "ERRO: plataforma Android não foi instalada."
-            exit 1
-          fi
+          test -d "$SDK_ROOT/platforms/android-37.2"
+          test -d "$SDK_ROOT/ndk/25.2.9519653"
 
-          echo "ANDROID_COMPILE_SDK=$COMPILE_SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$SDK_ROOT/ndk/25.2.9519653" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$SDK_ROOT/ndk/25.2.9519653" >> "$GITHUB_ENV"
 
-          echo "Plataforma Android instalada com sucesso."
+          echo "Android Platform 37.2 instalada."
+          echo "NDK 25.2.9519653 instalado."
+
+          ls -la "$SDK_ROOT/platforms"
+          ls -la "$SDK_ROOT/ndk"
 
       # ==========================================
       # 8. VERIFICAR AMBIENTE
@@ -320,24 +290,23 @@ jobs:
           echo "========== JAVA =========="
           java -version
 
-          echo "========== ANDROID SDK =========="
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-
           echo "========== SDKMANAGER =========="
           sdkmanager --version
 
-          echo "========== PLATAFORMAS =========="
-          ls -la "$ANDROID_HOME/platforms"
+          echo "========== ANDROID SDK =========="
+          echo "$ANDROID_HOME"
 
-          echo "========== BUILD TOOLS =========="
-          ls -la "$ANDROID_HOME/build-tools" || true
+          echo "========== ANDROID PLATFORM =========="
+          ls -la "$ANDROID_HOME/platforms/android-37.2"
+
+          echo "========== ANDROID NDK =========="
+          ls -la "$ANDROID_NDK_HOME"
 
           echo "========== ADB =========="
           adb version
 
       # ==========================================
-      # 9. VERIFICAR PROJETOS GRADLE
+      # 9. VERIFICAR MÓDULOS GRADLE
       # ==========================================
 
       - name: Identificar módulos Gradle
@@ -368,16 +337,10 @@ jobs:
           echo "COMPILANDO ZALITH LAUNCHER 2"
           echo "======================================"
 
-          echo "Java:"
           java -version
 
-          echo "Android SDK:"
-          echo "$ANDROID_HOME"
-
-          echo "Compile SDK:"
-          echo "$ANDROID_COMPILE_SDK"
-
-          echo "Iniciando Gradle..."
+          echo "Android SDK: $ANDROID_HOME"
+          echo "Android NDK: $ANDROID_NDK_HOME"
 
           set -o pipefail
 
@@ -390,15 +353,12 @@ jobs:
 
           BUILD_STATUS=${PIPESTATUS[0]}
 
-          echo ""
           echo "======================================"
           echo "RESULTADO DA COMPILAÇÃO"
           echo "======================================"
 
           if [ "$BUILD_STATUS" -ne 0 ]; then
             echo "COMPILAÇÃO FALHOU."
-            echo ""
-            echo "Últimas 200 linhas:"
             tail -n 200 "$LOG"
           else
             echo "COMPILAÇÃO CONCLUÍDA."
@@ -428,7 +388,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Procurando arquivos APK..."
+          echo "Procurando APKs..."
 
           find "$PROJECT_DIR" \
             -type f \
@@ -440,11 +400,11 @@ jobs:
             -path "*/build/outputs/apk/*/*.apk" | wc -l)
 
           if [ "$APK_COUNT" -eq 0 ]; then
-            echo "ERRO: nenhum APK foi encontrado."
+            echo "ERRO: nenhum APK foi gerado."
             exit 1
           fi
 
-          echo "Quantidade de APKs: $APK_COUNT"
+          echo "APKs encontrados: $APK_COUNT"
 
       # ==========================================
       # 13. DISPONIBILIZAR APK
