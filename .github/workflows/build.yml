@@ -3,37 +3,87 @@ name: Compilar Zalith Launcher 2
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Gerar APK Android
     runs-on: ubuntu-latest
     timeout-minutes: 120
 
     steps:
-      - name: Baixar código-fonte
+      - name: Baixar arquivos
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
-      - name: Localizar projeto Gradle
+      - name: Reunir partes do código-fonte
         shell: bash
         run: |
-          echo "Procurando o código-fonte..."
+          set -euo pipefail
 
-          GRADLEW=$(find . -type f -name gradlew \
-            -not -path '*/.gradle/*' -print -quit)
+          mkdir -p source extracted
+
+          python3 <<'PY'
+          import os
+          import re
+          import glob
+          import zipfile
+
+          files = glob.glob("*")
+          parts = {}
+
+          for f in files:
+              match = re.search(r'\.(\d{3})$', f)
+              if match:
+                  parts[int(match.group(1))] = f
+
+          expected = list(range(1, 19))
+          missing = [n for n in expected if n not in parts]
+
+          if missing:
+              raise SystemExit(
+                  "Partes ausentes: " + ", ".join(map(str, missing))
+              )
+
+          with open("source/ZalithLauncher2.zip", "wb") as output:
+              for n in expected:
+                  name = parts[n]
+                  print("Reunindo:", name)
+                  with open(name, "rb") as part:
+                      while True:
+                          data = part.read(1024 * 1024)
+                          if not data:
+                              break
+                          output.write(data)
+
+          archive = "source/ZalithLauncher2.zip"
+
+          if not zipfile.is_zipfile(archive):
+              raise SystemExit(
+                  "O arquivo reunido não é um ZIP válido."
+              )
+
+          with zipfile.ZipFile(archive) as z:
+              bad = z.testzip()
+              if bad:
+                  raise SystemExit("Arquivo corrompido: " + bad)
+
+              z.extractall("extracted")
+
+          print("ZIP reunido e extraído com sucesso.")
+          PY
+
+      - name: Localizar projeto Android
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          GRADLEW=$(find extracted -type f \
+            -name gradlew -print -quit)
 
           if [ -z "$GRADLEW" ]; then
-            echo "::error::gradlew não encontrado. Envie o código-fonte completo do Zalith Launcher 2."
-            echo "Arquivos encontrados na raiz:"
-            ls -la
+            echo "::error::O código-fonte extraído não contém gradlew."
+            find extracted -maxdepth 3 -type f | head -100
             exit 1
           fi
 
@@ -41,56 +91,45 @@ jobs:
 
           if [ ! -f "$PROJECT_DIR/settings.gradle.kts" ] && \
              [ ! -f "$PROJECT_DIR/settings.gradle" ]; then
-            echo "::error::settings.gradle não encontrado junto ao gradlew."
+            echo "::error::Arquivo settings.gradle não encontrado."
             exit 1
           fi
 
-          echo "Projeto localizado em: $PROJECT_DIR"
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-
           chmod +x "$GRADLEW"
 
-      - name: Configurar Java 21
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Projeto encontrado: $PROJECT_DIR"
+
+      - name: Configurar Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
 
+      - name: Configurar Android SDK
+        uses: android-actions/setup-android@v3
+
       - name: Configurar Gradle
         uses: gradle/actions/setup-gradle@v5
 
-      - name: Preparar Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Compilar APK
-        shell: bash
+      - name: Verificar módulos
         run: |
           cd "$PROJECT_DIR"
+          ./gradlew projects
 
-          ./gradlew ZalithLauncher:assembleDebug \
+      - name: Compilar APK
+        run: |
+          cd "$PROJECT_DIR"
+          ./gradlew assembleDebug \
             -Darch=all \
             --no-daemon \
             --stacktrace
 
-      - name: Verificar APK
-        shell: bash
-        run: |
-          find "$PROJECT_DIR" -type f \
-            -path '*/build/outputs/apk/debug/*.apk' \
-            -print
-
-          if ! find "$PROJECT_DIR" -type f \
-            -path '*/build/outputs/apk/debug/*.apk' \
-            -print -quit | grep -q .; then
-            echo "::error::Nenhum APK foi gerado."
-            exit 1
-          fi
-
-      - name: Disponibilizar APK
+      - name: Publicar APK
         uses: actions/upload-artifact@v4
         with:
           name: ZalithLauncher2-APK
-          path: '**/build/outputs/apk/debug/*.apk'
+          path: extracted/**/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 14
           
