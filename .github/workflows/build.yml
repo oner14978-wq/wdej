@@ -28,7 +28,7 @@ jobs:
       - name: Verificar arquivos divididos
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           echo "Procurando as 18 partes do projeto..."
 
@@ -44,34 +44,35 @@ jobs:
 
               if match:
                   number = int(match.group(1))
-
                   if 1 <= number <= 18:
+                      if number in parts:
+                          print("Parte duplicada:", number)
+                          sys.exit(1)
                       parts[number] = name
 
           missing = [
-              number
-              for number in range(1, 19)
-              if number not in parts
+              i for i in range(1, 19)
+              if i not in parts
           ]
 
           if missing:
-              print("ERRO: partes ausentes:", missing)
+              print("Partes ausentes:", missing)
               sys.exit(1)
 
-          for number in range(1, 19):
-              print(f"{number:03d}: {parts[number]}")
+          for i in range(1, 19):
+              print(f"{i:03d}: {parts[i]}")
 
-          print("As 18 partes foram encontradas.")
+          print("Todas as partes foram encontradas.")
           PY
 
       # ==========================================
-      # 3. RECONSTRUIR O ZIP
+      # 3. RECONSTRUIR E EXTRAIR O ZIP
       # ==========================================
 
       - name: Reconstruir arquivo ZIP original
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           mkdir -p source extracted
 
@@ -88,7 +89,6 @@ jobs:
 
               if match:
                   number = int(match.group(1))
-
                   if 1 <= number <= 18:
                       parts[number] = name
 
@@ -97,32 +97,29 @@ jobs:
           with open(output, "wb") as result:
               for number in range(1, 19):
                   filename = parts[number]
-
                   print("Reconstruindo:", filename)
 
                   with open(filename, "rb") as part:
                       while True:
                           data = part.read(1024 * 1024)
-
                           if not data:
                               break
-
                           result.write(data)
 
           if not zipfile.is_zipfile(output):
-              print("ERRO: arquivo reconstruído não é um ZIP válido.")
+              print("ERRO: arquivo reconstruído não é ZIP válido.")
               sys.exit(1)
 
           with zipfile.ZipFile(output) as archive:
-              bad_file = archive.testzip()
+              bad = archive.testzip()
 
-              if bad_file:
-                  print("ZIP corrompido:", bad_file)
+              if bad:
+                  print("Arquivo corrompido:", bad)
                   sys.exit(1)
 
               archive.extractall("extracted")
 
-          print("ZIP reconstruído e extraído com sucesso.")
+          print("ZIP reconstruído e extraído.")
           PY
 
       # ==========================================
@@ -132,7 +129,7 @@ jobs:
       - name: Localizar projeto Gradle
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           echo "Procurando gradlew..."
 
@@ -144,8 +141,7 @@ jobs:
             exit 1
           fi
 
-          PROJECT_DIR=$(dirname "$GRADLEW")
-          PROJECT_DIR=$(realpath "$PROJECT_DIR")
+          PROJECT_DIR="$(realpath "$(dirname "$GRADLEW")")"
 
           if [ ! -f "$PROJECT_DIR/settings.gradle" ] && \
              [ ! -f "$PROJECT_DIR/settings.gradle.kts" ]; then
@@ -157,13 +153,13 @@ jobs:
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Projeto localizado:"
+          echo "Diretório do projeto:"
           echo "$PROJECT_DIR"
 
           ls -la "$PROJECT_DIR"
 
       # ==========================================
-      # 5. INSTALAR JAVA
+      # 5. INSTALAR JAVA 21
       # ==========================================
 
       - name: Instalar Java 21
@@ -173,13 +169,13 @@ jobs:
           java-version: '21'
 
       # ==========================================
-      # 6. INSTALAR ANDROID SDK 16.0
+      # 6. INSTALAR ANDROID SDK COMMAND-LINE 16.0
       # ==========================================
 
       - name: Instalar Android SDK Command-line Tools 16.0
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           SDK_ROOT="/usr/local/lib/android/sdk"
           TEMP_DIR="$RUNNER_TEMP/android-sdk-tools"
@@ -187,7 +183,7 @@ jobs:
           mkdir -p "$TEMP_DIR"
           mkdir -p "$SDK_ROOT/cmdline-tools"
 
-          echo "Baixando Android Command-line Tools 16.0..."
+          echo "Baixando Command-line Tools 16.0..."
 
           curl -fL --retry 5 --retry-delay 3 \
             "https://dl.google.com/android/repository/commandlinetools-linux-12266719_latest.zip" \
@@ -203,7 +199,7 @@ jobs:
             exit 1
           fi
 
-          echo "Removendo ferramentas antigas..."
+          echo "Substituindo ferramentas antigas..."
 
           rm -rf "$SDK_ROOT/cmdline-tools/latest"
 
@@ -219,7 +215,7 @@ jobs:
           echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
           echo "$SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
 
-          echo "Versão do sdkmanager instalado:"
+          echo "Versão instalada:"
           "$SDKMANAGER" --version
 
           echo "Aceitando licenças..."
@@ -228,63 +224,126 @@ jobs:
             --sdk_root="$SDK_ROOT" \
             --licenses || true
 
-          echo "Instalando ferramentas Android básicas..."
+      # ==========================================
+      # 7. DETECTAR E INSTALAR COMPILE SDK
+      # ==========================================
+
+      - name: Detectar e instalar plataforma Android do projeto
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDK_ROOT="/usr/local/lib/android/sdk"
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+
+          echo "Detectando compileSdk nos arquivos Gradle..."
+
+          COMPILE_SDK=$(python3 - "$PROJECT_DIR" <<'PY'
+          import os
+          import re
+          import sys
+
+          root = sys.argv[1]
+          found = []
+
+          patterns = [
+              r'\bcompileSdk(?:Version)?\s*(?:=\s*)?["\']?(\d+)',
+              r'\bcompileSdkPreview\s*(?:=\s*)?["\']([^"\']+)'
+          ]
+
+          for base, dirs, files in os.walk(root):
+              dirs[:] = [
+                  d for d in dirs
+                  if d not in (".git", ".gradle", "build")
+              ]
+
+              for name in files:
+                  if name.endswith((".gradle", ".gradle.kts")):
+                      path = os.path.join(base, name)
+
+                      try:
+                          with open(path, encoding="utf-8") as f:
+                              content = f.read()
+                      except Exception:
+                          continue
+
+                      for pattern in patterns:
+                          for match in re.findall(pattern, content):
+                              if isinstance(match, str) and match.isdigit():
+                                  found.append(int(match))
+
+          if not found:
+              print(
+                  "Não foi possível detectar compileSdk nos arquivos Gradle.",
+                  file=sys.stderr
+              )
+              sys.exit(1)
+
+          version = max(found)
+
+          print("Compile SDK principal detectado:", version,
+                file=sys.stderr)
+
+          print(version)
+          PY
+          )
+
+          echo "Compile SDK principal: $COMPILE_SDK"
+
+          echo "Instalando plataforma Android $COMPILE_SDK..."
 
           "$SDKMANAGER" \
             --sdk_root="$SDK_ROOT" \
             "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0"
+            "platforms;android-$COMPILE_SDK"
 
-          echo "Verificando instalação..."
+          echo "Verificando plataforma instalada..."
 
-          "$SDKMANAGER" --version
-          "$SDK_ROOT/platform-tools/adb" version
+          if [ ! -d "$SDK_ROOT/platforms/android-$COMPILE_SDK" ]; then
+            echo "ERRO: plataforma Android não foi instalada."
+            exit 1
+          fi
 
-          echo "Android SDK instalado."
+          echo "ANDROID_COMPILE_SDK=$COMPILE_SDK" >> "$GITHUB_ENV"
+
+          echo "Plataforma Android instalada com sucesso."
 
       # ==========================================
-      # 7. VERIFICAR JAVA E ANDROID SDK
+      # 8. VERIFICAR AMBIENTE
       # ==========================================
 
-      - name: Verificar ambiente de compilação
+      - name: Verificar Java e Android SDK
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          echo "=================================="
-          echo "JAVA"
-          echo "=================================="
-
+          echo "========== JAVA =========="
           java -version
 
-          echo "=================================="
-          echo "ANDROID SDK"
-          echo "=================================="
-
+          echo "========== ANDROID SDK =========="
           echo "ANDROID_HOME=$ANDROID_HOME"
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
 
-          echo "=================================="
-          echo "SDKMANAGER"
-          echo "=================================="
-
+          echo "========== SDKMANAGER =========="
           sdkmanager --version
 
-          echo "=================================="
-          echo "PACOTES INSTALADOS"
-          echo "=================================="
+          echo "========== PLATAFORMAS =========="
+          ls -la "$ANDROID_HOME/platforms"
 
-          sdkmanager --list_installed
+          echo "========== BUILD TOOLS =========="
+          ls -la "$ANDROID_HOME/build-tools" || true
+
+          echo "========== ADB =========="
+          adb version
 
       # ==========================================
-      # 8. VERIFICAR PROJETOS GRADLE
+      # 9. VERIFICAR PROJETOS GRADLE
       # ==========================================
 
       - name: Identificar módulos Gradle
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           cd "$PROJECT_DIR"
 
@@ -293,7 +352,7 @@ jobs:
             --stacktrace
 
       # ==========================================
-      # 9. COMPILAR APK COM DIAGNÓSTICO COMPLETO
+      # 10. COMPILAR APK DEBUG
       # ==========================================
 
       - name: Compilar APK Debug
@@ -303,9 +362,11 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          echo "=================================="
+          LOG="$GITHUB_WORKSPACE/gradle-build.log"
+
+          echo "======================================"
           echo "COMPILANDO ZALITH LAUNCHER 2"
-          echo "=================================="
+          echo "======================================"
 
           echo "Java:"
           java -version
@@ -313,27 +374,32 @@ jobs:
           echo "Android SDK:"
           echo "$ANDROID_HOME"
 
+          echo "Compile SDK:"
+          echo "$ANDROID_COMPILE_SDK"
+
           echo "Iniciando Gradle..."
+
+          set -o pipefail
 
           ./gradlew assembleDebug \
             -Darch=all \
             --no-daemon \
             --stacktrace \
             --info \
-            2>&1 | tee "$GITHUB_WORKSPACE/gradle-build.log"
+            2>&1 | tee "$LOG"
 
           BUILD_STATUS=${PIPESTATUS[0]}
 
           echo ""
-          echo "=================================="
+          echo "======================================"
           echo "RESULTADO DA COMPILAÇÃO"
-          echo "=================================="
+          echo "======================================"
 
           if [ "$BUILD_STATUS" -ne 0 ]; then
-            echo "ERRO: a compilação falhou."
+            echo "COMPILAÇÃO FALHOU."
             echo ""
-            echo "Últimas 150 linhas do log:"
-            tail -n 150 "$GITHUB_WORKSPACE/gradle-build.log"
+            echo "Últimas 200 linhas:"
+            tail -n 200 "$LOG"
           else
             echo "COMPILAÇÃO CONCLUÍDA."
           fi
@@ -341,10 +407,10 @@ jobs:
           exit "$BUILD_STATUS"
 
       # ==========================================
-      # 10. ENVIAR LOG MESMO SE FALHAR
+      # 11. SALVAR LOG MESMO SE FALHAR
       # ==========================================
 
-      - name: Salvar log completo da compilação
+      - name: Salvar log completo do Gradle
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -354,15 +420,15 @@ jobs:
           retention-days: 7
 
       # ==========================================
-      # 11. VERIFICAR APK
+      # 12. VERIFICAR APK
       # ==========================================
 
       - name: Verificar APK gerado
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          echo "Procurando APKs..."
+          echo "Procurando arquivos APK..."
 
           find "$PROJECT_DIR" \
             -type f \
@@ -374,22 +440,21 @@ jobs:
             -path "*/build/outputs/apk/*/*.apk" | wc -l)
 
           if [ "$APK_COUNT" -eq 0 ]; then
-            echo "ERRO: nenhum APK foi gerado."
+            echo "ERRO: nenhum APK foi encontrado."
             exit 1
           fi
 
-          echo "APKs encontrados: $APK_COUNT"
+          echo "Quantidade de APKs: $APK_COUNT"
 
       # ==========================================
-      # 12. DISPONIBILIZAR APK PARA DOWNLOAD
+      # 13. DISPONIBILIZAR APK
       # ==========================================
 
       - name: Enviar APK para download
         uses: actions/upload-artifact@v4
         with:
           name: ZalithLauncher2-APK
-          path: |
-            extracted/**/build/outputs/apk/debug/*.apk
+          path: extracted/**/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 30
           
