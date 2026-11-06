@@ -1,413 +1,237 @@
-
-name: Construir Zalith Launcher 2
+name: Build APK
 
 on:
   workflow_dispatch:
+    inputs:
+      variant:
+        description: "Tipo de compilação"
+        required: true
+        type: choice
+        options:
+          - Debug
+          - Release
+        default: Debug
+
+  workflow_call:
+    inputs:
+      variant:
+        required: true
+        type: string
+    secrets:
+      KEY_PASSWORD:
+        required: false
+      STORE_PASSWORD:
+        required: false
+      OAUTH_CLIENT_ID:
+        required: false
+      CURSEFORGE_API_KEY:
+        required: false
 
 permissions:
   contents: read
 
-concurrency:
-  group: zalith-launcher2-build-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
   build:
-    name: Construir Zalith Launcher 2
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+
+    strategy:
+      matrix:
+        arch: ["all", "arm", "arm64", "x86", "x86_64"]
+      fail-fast: false
 
     env:
-      ANDROID_HOME: /usr/local/lib/android/sdk
-      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+      STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+      OAUTH_CLIENT_ID: ${{ secrets.OAUTH_CLIENT_ID }}
+      CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
-      # 1. BAIXAR REPOSITÓRIO
-      - name: Baixar código
-        uses: actions/checkout@v7
-
-      - name: Informações do ambiente
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "CONSTRUÇÃO DO ZALITH LAUNCHER 2"
-          lsb_release -a
-          uname -a
-          df -h
-
-      # 2. VERIFICAR OS 18 ARQUIVOS
-      - name: Verificar os 18 pedaços
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p source extracted
-
-          for NUMBER in $(seq 1 18); do
-            SUFFIX=$(printf '%03d' "$NUMBER")
-
-            mapfile -t MATCHES < <(
-              find "$GITHUB_WORKSPACE" \
-                -maxdepth 1 \
-                -type f \
-                -name "*.${SUFFIX}"
-            )
-
-            if [ "${#MATCHES[@]}" -ne 1 ]; then
-              echo "::error::Esperado um arquivo .$SUFFIX; encontrados ${#MATCHES[@]}."
-              exit 1
-            fi
-
-            echo "OK: ${MATCHES[0]}"
-          done
-
-      # 3. RECONSTRUIR ZIP
-      - name: Reconstruir ZIP
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          OUTPUT="$GITHUB_WORKSPACE/source/ZalithLauncher2.zip"
-          rm -f "$OUTPUT"
-          touch "$OUTPUT"
-
-          for NUMBER in $(seq 1 18); do
-            SUFFIX=$(printf '%03d' "$NUMBER")
-
-            mapfile -t MATCHES < <(
-              find "$GITHUB_WORKSPACE" \
-                -maxdepth 1 \
-                -type f \
-                -name "*.${SUFFIX}"
-            )
-
-            if [ "${#MATCHES[@]}" -ne 1 ]; then
-              echo "::error::Pedaço .$SUFFIX não localizado."
-              exit 1
-            fi
-
-            echo "Adicionando ${MATCHES[0]}"
-            cat "${MATCHES[0]}" >> "$OUTPUT"
-          done
-
-          ls -lh "$OUTPUT"
-
-          unzip -t "$OUTPUT"
-
-      # 4. EXTRAIR CÓDIGO
-      - name: Extrair código-fonte
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          unzip -q source/ZalithLauncher2.zip -d extracted
-
-          echo "Extração concluída."
-          find extracted -maxdepth 3 -type f | head -150
-
-      # 5. LOCALIZAR GRADLE
-      - name: Localizar projeto Gradle
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          GRADLEW=""
-
-          while IFS= read -r FILE; do
-            DIR="$(dirname "$FILE")"
-
-            if [ -f "$DIR/settings.gradle" ] || \
-               [ -f "$DIR/settings.gradle.kts" ]; then
-              GRADLEW="$FILE"
-              break
-            fi
-          done < <(find extracted -type f -name gradlew)
-
-          if [ -z "$GRADLEW" ]; then
-            echo "::error::gradlew não encontrado."
-            exit 1
-          fi
-
-          PROJECT_DIR="$(dirname "$GRADLEW")"
-
-          chmod +x "$GRADLEW"
-
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-
-          echo "Projeto: $PROJECT_DIR"
-          ls -la "$PROJECT_DIR"
-
-      # 6. JAVA 21
-      - name: Configurar Java 21
-        uses: actions/setup-java@v6
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: '21'
-          cache: gradle
-          cache-dependency-path: |
-            extracted/**/gradle/wrapper/gradle-wrapper.properties
-            extracted/**/*.gradle
-            extracted/**/*.gradle.kts
-            extracted/**/gradle.properties
+          java-version: "21"
 
-      - name: Verificar Java
-        shell: bash
-        run: |
-          java -version
-          javac -version
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          add-job-summary: on-failure
 
-      # 7. COMMAND LINE TOOLS
-      - name: Instalar Android Command Line Tools 16
-        shell: bash
-        run: |
-          set -euo pipefail
+      # RUST
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
 
-          SDK_ROOT="$ANDROID_HOME"
-          CMD_DIR="$SDK_ROOT/cmdline-tools"
-          TEMP_DIR="$RUNNER_TEMP/android-command-tools"
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            PetLib/rust/target
+          key: petlib-rust-${{ runner.os }}-${{ hashFiles('PetLib/rust/Cargo.lock') }}
+          restore-keys: |
+            petlib-rust-${{ runner.os }}-
 
-          mkdir -p "$CMD_DIR" "$TEMP_DIR"
-          cd "$TEMP_DIR"
-
-          curl -fL --retry 3 \
-            "https://dl.google.com/android/repository/commandlinetools-linux-12266719_latest.zip" \
-            -o commandlinetools.zip
-
-          unzip -q commandlinetools.zip
-
-          rm -rf "$CMD_DIR/latest"
-          mkdir -p "$CMD_DIR/latest"
-
-          mv cmdline-tools/* "$CMD_DIR/latest/"
-
-          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
-          echo "$CMD_DIR/latest/bin" >> "$GITHUB_PATH"
-
-          echo "Command Line Tools instalados."
-
-      # 8. ACEITAR LICENÇAS SEM FALSO ERRO DE BROKEN PIPE
-      - name: Aceitar licenças Android
+      # CARGO-NDK CORRIGIDO
+      - name: Install cargo-ndk
         shell: bash
         run: |
           set -euo pipefail
 
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          mkdir -p "$HOME/.cargo/bin"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
 
-          mkdir -p "$HOME/.android"
-          touch "$HOME/.android/repositories.cfg"
+          rustup toolchain install stable --profile minimal
+          rustup default stable
 
-          echo "Verificando SDK Manager:"
-          "$SDKMANAGER" --version
+          rustup target add \
+            aarch64-linux-android \
+            armv7-linux-androideabi \
+            x86_64-linux-android \
+            i686-linux-android
 
-          echo "Aceitando licenças Android..."
+          cargo install cargo-ndk --locked
 
-          set +e
-          yes | "$SDKMANAGER" \
-            --sdk_root="$ANDROID_HOME" \
-            --licenses
+          echo "Verificando ferramentas Rust..."
 
-          STATUS=("${PIPESTATUS[@]}")
-          set -e
+          command -v cargo
+          command -v rustup
+          command -v cargo-ndk
 
-          YES_STATUS="${STATUS[0]}"
-          SDK_STATUS="${STATUS[1]}"
+          cargo --version
+          rustc --version
+          cargo ndk --version
 
-          echo "Código do yes: $YES_STATUS"
-          echo "Código do SDK Manager: $SDK_STATUS"
+          echo "Alvos Android instalados:"
+          rustup target list --installed
 
-          if [ "$SDK_STATUS" -ne 0 ]; then
-            echo "::error::O SDK Manager falhou ao processar as licenças."
-            exit "$SDK_STATUS"
-          fi
-
-          echo "Licenças processadas pelo SDK Manager."
-
-      # 9. CONSULTAR PACOTES
-      - name: Consultar pacotes Android
+      # ANDROID NDK
+      - name: Setup Android NDK
         shell: bash
         run: |
           set -euo pipefail
 
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          NDK_VERSION="25.2.9519653"
 
-          "$SDKMANAGER" \
-            --sdk_root="$ANDROID_HOME" \
-            --list \
-            > "$RUNNER_TEMP/android-packages.txt"
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" \
+            -name sdkmanager -type f | sort -V | tail -1)"
 
-          echo "Pacotes Android encontrados."
-
-          if ! grep -Fq "platforms;android-37.2" \
-            "$RUNNER_TEMP/android-packages.txt"; then
-
-            echo "::error::platforms;android-37.2 não está disponível."
-
-            grep -E 'platforms;android-' \
-              "$RUNNER_TEMP/android-packages.txt" |
-              tail -40 || true
-
+          if [ -z "$SDKMANAGER" ]; then
+            echo "::error::SDK Manager não encontrado."
             exit 1
           fi
 
-      # 10. INSTALAR SDK E NDK SEM PIPE YES
-      - name: Instalar Android SDK 37.2 e NDK
+          "$SDKMANAGER" --sdk_root="$ANDROID_HOME" \
+            --install "platform-tools" "ndk;${NDK_VERSION}"
+
+          NDK_PATH="$ANDROID_HOME/ndk/$NDK_VERSION"
+
+          if [ ! -f "$NDK_PATH/source.properties" ]; then
+            echo "::error::NDK $NDK_VERSION não foi encontrado."
+            exit 1
+          fi
+
+          echo "NDK instalado: $NDK_PATH"
+
+          echo "ANDROID_NDK_HOME=$NDK_PATH" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$NDK_PATH" >> "$GITHUB_ENV"
+
+      # VERIFICAÇÃO
+      - name: Verify Rust and Android environment
         shell: bash
         run: |
           set -euo pipefail
 
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          export PATH="$HOME/.cargo/bin:$PATH"
 
-          echo "Instalando platform-tools..."
-          "$SDKMANAGER" \
-            --sdk_root="$ANDROID_HOME" \
-            --install "platform-tools"
+          echo "Java:"
+          java -version
 
-          echo "Instalando Android 37.2..."
-          "$SDKMANAGER" \
-            --sdk_root="$ANDROID_HOME" \
-            --install "platforms;android-37.2"
+          echo "Rust:"
+          rustc --version
+          cargo --version
 
-          echo "Instalando NDK 25.2.9519653..."
-          "$SDKMANAGER" \
-            --sdk_root="$ANDROID_HOME" \
-            --install "ndk;25.2.9519653"
+          echo "Cargo NDK:"
+          cargo ndk --version
 
-          echo "Instalação dos pacotes concluída."
+          echo "Android NDK:"
+          echo "$ANDROID_NDK_HOME"
 
-      # 11. VERIFICAR SDK E NDK
-      - name: Verificar instalações Android
+          test -f "$ANDROID_NDK_HOME/source.properties"
+
+          echo "Verificando os quatro alvos..."
+
+          for target in \
+            aarch64-linux-android \
+            armv7-linux-androideabi \
+            x86_64-linux-android \
+            i686-linux-android
+          do
+            rustup target list --installed | grep -Fx "$target"
+          done
+
+      # COMPILAÇÃO
+      - name: Build APK for ${{ matrix.arch }}
         shell: bash
         run: |
           set -euo pipefail
 
-          test -d "$ANDROID_HOME/platforms/android-37.2"
-          test -d "$ANDROID_HOME/ndk/25.2.9519653"
+          export PATH="$HOME/.cargo/bin:$PATH"
 
-          echo "Plataforma Android:"
-          ls -la "$ANDROID_HOME/platforms"
+          chmod +x gradlew
 
-          echo "NDK:"
-          ls -la "$ANDROID_HOME/ndk/25.2.9519653"
+          VARIANT="${{ inputs.variant }}"
 
-          echo "Build Tools:"
-          ls -la "$ANDROID_HOME/build-tools" || true
+          if [ -z "$VARIANT" ]; then
+            VARIANT="Debug"
+          fi
 
-      # 12. VERIFICAR GRADLE
-      - name: Verificar estrutura Gradle
-        shell: bash
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          set -euo pipefail
+          echo "Compilando variante: $VARIANT"
+          echo "Arquitetura: ${{ matrix.arch }}"
 
-          echo "Diretório:"
-          pwd
-
-          ls -la
-
-          ./gradlew projects \
+          ./gradlew \
+            "ZalithLauncher:assemble${VARIANT}" \
+            -Darch="${{ matrix.arch }}" \
             --no-daemon \
             --stacktrace
 
-      # 13. COMPILAR APK
-      - name: Compilar APK Debug
-        shell: bash
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          set +e
-          set -o pipefail
-
-          BUILD_LOG="$GITHUB_WORKSPACE/gradle-build.log"
-
-          echo "=================================="
-          echo "COMPILANDO ZALITH LAUNCHER 2"
-          echo "=================================="
-
-          java -version
-          ./gradlew --version
-
-          ./gradlew assembleDebug \
-            -Darch=all \
-            --no-daemon \
-            --stacktrace \
-            --info 2>&1 |
-            tee "$BUILD_LOG"
-
-          BUILD_STATUS=${PIPESTATUS[0]}
-
-          if [ "$BUILD_STATUS" -ne 0 ]; then
-            echo "FALHA NA COMPILAÇÃO"
-            tail -n 200 "$BUILD_LOG"
-            exit "$BUILD_STATUS"
-          fi
-
-          echo "Compilação concluída."
-
-      # 14. LOCALIZAR APK
-      - name: Verificar APK Debug
-        if: success()
-        shell: bash
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          set -euo pipefail
-
-          mapfile -t APKS < <(
-            find . \
-              -type f \
-              -path '*/build/outputs/apk/debug/*.apk'
-          )
-
-          if [ "${#APKS[@]}" -eq 0 ]; then
-            echo "::error::Nenhum APK Debug foi encontrado."
-            exit 1
-          fi
-
-          mkdir -p "$GITHUB_WORKSPACE/apk-output"
-
-          for APK in "${APKS[@]}"; do
-            echo "Copiando: $APK"
-            cp "$APK" "$GITHUB_WORKSPACE/apk-output/"
-          done
-
-          ls -lh "$GITHUB_WORKSPACE/apk-output"
-
-      # 15. ENVIAR LOGS
-      - name: Salvar logs da compilação
-        if: always()
+      # APK RELEASE
+      - name: Upload Release APK for ${{ matrix.arch }}
+        if: inputs.variant == 'Release'
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
-          name: ZalithLauncher2-Gradle-Log
-          path: gradle-build.log
+          name: release-apk-${{ matrix.arch }}
+          path: ZalithLauncher/build/outputs/apk/release/*.apk
           if-no-files-found: warn
-          retention-days: 14
-
-      # 16. ENVIAR APK
-      - name: Enviar APK Debug
-        if: success()
-        uses: actions/upload-artifact@v7
-        with:
-          name: ZalithLauncher2-APK
-          path: apk-output/*.apk
-          if-no-files-found: error
           retention-days: 30
 
-      # 17. RESUMO
-      - name: Resumo da construção
-        if: always()
-        shell: bash
-        run: |
-          echo "=================================="
-          echo "RESUMO ZALITH LAUNCHER 2"
-          echo "=================================="
+      - name: Upload Release Mapping for ${{ matrix.arch }}
+        if: inputs.variant == 'Release'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: mapping-${{ matrix.arch }}
+          path: ZalithLauncher/build/outputs/mapping/release/mapping.txt
+          if-no-files-found: warn
+          retention-days: 30
 
-          echo "Ubuntu: 24.04"
-          echo "Java: 21"
-          echo "Android SDK: 37.2"
-          echo "NDK: 25.2.9519653"
-
-          if [ -d "$GITHUB_WORKSPACE/apk-output" ]; then
-            ls -lh "$GITHUB_WORKSPACE/apk-output"
-          else
-            echo "APK não gerado."
-          fi
-          
+      # APK DEBUG
+      - name: Upload Debug APK for ${{ matrix.arch }}
+        if: inputs.variant != 'Release'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: debug-apk-${{ matrix.arch }}
+          path: ZalithLauncher/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
+          retention-days: 30
