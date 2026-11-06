@@ -1,5 +1,5 @@
 
-name: Compilar Zalith Launcher 2
+name: Construir Zalith Launcher 2 APK
 
 on:
   workflow_dispatch:
@@ -9,127 +9,259 @@ permissions:
 
 jobs:
   build:
+    name: Baixar ferramentas e compilar APK
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 360
 
     steps:
-      - name: Baixar arquivos
+      - name: Baixar arquivos do repositório
         uses: actions/checkout@v4
 
-      - name: Reunir partes do código-fonte
+      - name: Verificar arquivos divididos
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
+
+          echo "Procurando as 18 partes do projeto..."
+
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+
+          files = os.listdir(".")
+          parts = {}
+
+          for name in files:
+              match = re.search(r'\.(\d{3})$', name)
+              if match:
+                  number = int(match.group(1))
+                  if 1 <= number <= 18:
+                      parts[number] = name
+
+          missing = [i for i in range(1, 19) if i not in parts]
+
+          if missing:
+              print("ERRO: partes ausentes:", missing)
+              sys.exit(1)
+
+          print("Todas as 18 partes foram encontradas:")
+          for i in range(1, 19):
+              print(f"{i:03d}: {parts[i]}")
+          PY
+
+      - name: Reconstruir arquivo ZIP original
+        shell: bash
+        run: |
+          set -e
 
           mkdir -p source extracted
 
-          python3 <<'PY'
+          python3 - <<'PY'
           import os
           import re
-          import glob
           import zipfile
+          import sys
 
-          files = glob.glob("*")
           parts = {}
 
-          for f in files:
-              match = re.search(r'\.(\d{3})$', f)
+          for name in os.listdir("."):
+              match = re.search(r'\.(\d{3})$', name)
               if match:
-                  parts[int(match.group(1))] = f
+                  number = int(match.group(1))
+                  if 1 <= number <= 18:
+                      parts[number] = name
 
-          expected = list(range(1, 19))
-          missing = [n for n in expected if n not in parts]
+          output = "source/ZalithLauncher2.zip"
 
-          if missing:
-              raise SystemExit(
-                  "Partes ausentes: " + ", ".join(map(str, missing))
-              )
+          with open(output, "wb") as result:
+              for number in range(1, 19):
+                  filename = parts[number]
+                  print("Unindo:", filename)
 
-          with open("source/ZalithLauncher2.zip", "wb") as output:
-              for n in expected:
-                  name = parts[n]
-                  print("Reunindo:", name)
-                  with open(name, "rb") as part:
+                  with open(filename, "rb") as part:
                       while True:
                           data = part.read(1024 * 1024)
                           if not data:
                               break
-                          output.write(data)
+                          result.write(data)
 
-          archive = "source/ZalithLauncher2.zip"
+          if not zipfile.is_zipfile(output):
+              print("ERRO: o arquivo reconstruído não é um ZIP válido.")
+              sys.exit(1)
 
-          if not zipfile.is_zipfile(archive):
-              raise SystemExit(
-                  "O arquivo reunido não é um ZIP válido."
-              )
+          with zipfile.ZipFile(output) as archive:
+              bad = archive.testzip()
 
-          with zipfile.ZipFile(archive) as z:
-              bad = z.testzip()
               if bad:
-                  raise SystemExit("Arquivo corrompido: " + bad)
+                  print("Arquivo ZIP corrompido:", bad)
+                  sys.exit(1)
 
-              z.extractall("extracted")
+              archive.extractall("extracted")
 
-          print("ZIP reunido e extraído com sucesso.")
+          print("Projeto reconstruído e extraído com sucesso.")
           PY
 
-      - name: Localizar projeto Android
+      - name: Localizar projeto Gradle
+        id: project
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          GRADLEW=$(find extracted -type f \
-            -name gradlew -print -quit)
+          GRADLEW=$(find extracted -type f -name gradlew -print -quit)
 
           if [ -z "$GRADLEW" ]; then
-            echo "::error::O código-fonte extraído não contém gradlew."
-            find extracted -maxdepth 3 -type f | head -100
+            echo "ERRO: gradlew não encontrado."
+            echo "Verifique se as partes pertencem ao mesmo arquivo ZIP."
+            find extracted -maxdepth 4 -type f | head -100
             exit 1
           fi
 
           PROJECT_DIR=$(dirname "$GRADLEW")
+          PROJECT_DIR=$(realpath "$PROJECT_DIR")
 
-          if [ ! -f "$PROJECT_DIR/settings.gradle.kts" ] && \
-             [ ! -f "$PROJECT_DIR/settings.gradle" ]; then
-            echo "::error::Arquivo settings.gradle não encontrado."
+          if [ ! -f "$PROJECT_DIR/settings.gradle" ] && \
+             [ ! -f "$PROJECT_DIR/settings.gradle.kts" ]; then
+            echo "ERRO: arquivo settings.gradle não encontrado."
             exit 1
           fi
 
-          chmod +x "$GRADLEW"
+          chmod +x "$PROJECT_DIR/gradlew"
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Projeto encontrado: $PROJECT_DIR"
 
-      - name: Configurar Java
+          echo "Projeto localizado em: $PROJECT_DIR"
+          ls -la "$PROJECT_DIR"
+
+      - name: Instalar Java 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
 
-      - name: Configurar Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Configurar Gradle
-        uses: gradle/actions/setup-gradle@v5
-
-      - name: Verificar módulos
+      - name: Instalar Android SDK Command-line Tools 16.0
+        shell: bash
         run: |
-          cd "$PROJECT_DIR"
-          ./gradlew projects
+          set -e
 
-      - name: Compilar APK
+          SDK_ROOT="/usr/local/lib/android/sdk"
+          TEMP_DIR="$RUNNER_TEMP/android-sdk-tools"
+
+          echo "Preparando Android SDK..."
+          mkdir -p "$TEMP_DIR"
+          mkdir -p "$SDK_ROOT/cmdline-tools"
+
+          echo "Baixando diretamente a versão 16.0..."
+          curl -fL --retry 5 --retry-delay 3 \
+            "https://dl.google.com/android/repository/commandlinetools-linux-12266719_latest.zip" \
+            -o "$TEMP_DIR/commandline-tools.zip"
+
+          echo "Extraindo ferramentas..."
+          unzip -q -o "$TEMP_DIR/commandline-tools.zip" -d "$TEMP_DIR"
+
+          if [ ! -f "$TEMP_DIR/cmdline-tools/bin/sdkmanager" ]; then
+            echo "ERRO: sdkmanager não encontrado no pacote baixado."
+            exit 1
+          fi
+
+          echo "Substituindo a instalação antiga..."
+          rm -rf "$SDK_ROOT/cmdline-tools/latest"
+
+          mv "$TEMP_DIR/cmdline-tools" \
+            "$SDK_ROOT/cmdline-tools/latest"
+
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+
+          chmod +x "$SDKMANAGER"
+
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          echo "$SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+
+          echo "Verificando a nova instalação..."
+          "$SDKMANAGER" --version
+
+          echo "Instalando componentes Android..."
+          "$SDKMANAGER" --sdk_root="$SDK_ROOT" \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+          echo "Aceitando licenças Android..."
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses || true
+
+          echo "Verificação final do SDK..."
+          "$SDKMANAGER" --version
+          "$SDK_ROOT/platform-tools/adb" version
+
+          echo "Android SDK configurado."
+
+      - name: Verificar ambiente de compilação
+        shell: bash
         run: |
+          set -e
+
+          echo "Java:"
+          java -version
+
+          echo "Android SDK:"
+          echo "$ANDROID_HOME"
+
+          echo "Gradle:"
           cd "$PROJECT_DIR"
+          ./gradlew --version
+
+      - name: Identificar módulos Gradle
+        shell: bash
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
+          ./gradlew projects --no-daemon
+
+      - name: Compilar APK Debug
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          echo "Iniciando compilação do Zalith Launcher 2..."
+
           ./gradlew assembleDebug \
             -Darch=all \
             --no-daemon \
             --stacktrace
 
-      - name: Publicar APK
+      - name: Verificar APK gerado
+        shell: bash
+        run: |
+          set -e
+
+          echo "Procurando APKs..."
+
+          find "$PROJECT_DIR" \
+            -type f \
+            -path "*/build/outputs/apk/*/*.apk" \
+            -print
+
+          APK_COUNT=$(find "$PROJECT_DIR" \
+            -type f \
+            -path "*/build/outputs/apk/*/*.apk" | wc -l)
+
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "ERRO: nenhum APK foi gerado."
+            exit 1
+          fi
+
+          echo "Quantidade de APKs encontrados: $APK_COUNT"
+
+      - name: Enviar APK para download
         uses: actions/upload-artifact@v4
         with:
           name: ZalithLauncher2-APK
-          path: extracted/**/build/outputs/apk/debug/*.apk
+          path: |
+            extracted/**/build/outputs/apk/debug/*.apk
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
           
