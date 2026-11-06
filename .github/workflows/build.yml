@@ -1,420 +1,491 @@
 
-name: Construir Zalith Launcher 2 APK
+name: Construir Zalith Launcher 2
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build.yml'
+      - 'Zali*.zip.*'
+      - 'Zalit*.zip.*'
+      - 'Zalith*.zip.*'
 
 permissions:
   contents: read
 
+concurrency:
+  group: zalith-launcher2-build-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     name: Construir Zalith Launcher 2
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      BUILD_LOG: ${{ github.workspace }}/gradle-build.log
 
     steps:
-      # ==========================================
+      # --------------------------------------------------
       # 1. BAIXAR O REPOSITÓRIO
-      # ==========================================
+      # --------------------------------------------------
+      - name: Baixar código do repositório
+        uses: actions/checkout@v7
 
-      - name: Baixar arquivos do repositório
-        uses: actions/checkout@v4
+      - name: Informações do ambiente
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "CONSTRUÇÃO DO ZALITH LAUNCHER 2"
+          echo "========================================"
+          echo "Sistema:"
+          lsb_release -a
+          echo
+          echo "Arquitetura:"
+          uname -m
+          echo
+          echo "Espaço disponível:"
+          df -h
 
-      # ==========================================
-      # 2. VERIFICAR AS 18 PARTES
-      # ==========================================
-
-      - name: Verificar arquivos divididos
+      # --------------------------------------------------
+      # 2. VERIFICAR OS 18 ARQUIVOS ZIP
+      # --------------------------------------------------
+      - name: Verificar os 18 pedaços do código-fonte
         shell: bash
         run: |
           set -euo pipefail
 
-          python3 - <<'PY'
-          import os
-          import re
-          import sys
+          mkdir -p "$GITHUB_WORKSPACE/source"
+          mkdir -p "$GITHUB_WORKSPACE/extracted"
 
-          parts = {}
+          mapfile -t PARTS < <(
+            find "$GITHUB_WORKSPACE" \
+              -maxdepth 1 \
+              -type f \
+              -regextype posix-extended \
+              -regex '.*/[^/]+\.[0-9]{3}$' |
+              sort -V
+          )
 
-          for name in os.listdir("."):
-              match = re.search(r'\.(\d{3})$', name)
+          echo "Arquivos encontrados: ${#PARTS[@]}"
 
-              if match:
-                  number = int(match.group(1))
+          if [ "${#PARTS[@]}" -ne 18 ]; then
+            echo "::error::Esperados 18 pedaços ZIP, encontrados ${#PARTS[@]}."
+            printf '%s\n' "${PARTS[@]}"
+            exit 1
+          fi
 
-                  if 1 <= number <= 18:
-                      if number in parts:
-                          print("Parte duplicada:", number)
-                          sys.exit(1)
+          for i in "${!PARTS[@]}"; do
+            expected=$(printf "%03d" "$((i + 1))")
+            actual="${PARTS[$i]##*.}"
 
-                      parts[number] = name
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::Pedaço ausente ou fora de ordem: esperado $expected, encontrado $actual"
+              exit 1
+            fi
 
-          missing = [
-              i for i in range(1, 19)
-              if i not in parts
-          ]
+            echo "OK: ${PARTS[$i]}"
+          done
 
-          if missing:
-              print("Partes ausentes:", missing)
-              sys.exit(1)
+          echo "Todos os 18 pedaços foram encontrados."
 
-          for i in range(1, 19):
-              print(f"{i:03d}: {parts[i]}")
-
-          print("Todas as 18 partes foram encontradas.")
-          PY
-
-      # ==========================================
+      # --------------------------------------------------
       # 3. RECONSTRUIR O ZIP
-      # ==========================================
-
+      # --------------------------------------------------
       - name: Reconstruir arquivo ZIP original
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p source extracted
+          OUTPUT="$GITHUB_WORKSPACE/source/ZalithLauncher2.zip"
 
-          python3 - <<'PY'
-          import os
-          import re
-          import zipfile
-          import sys
+          : > "$OUTPUT"
 
-          parts = {}
+          mapfile -t PARTS < <(
+            find "$GITHUB_WORKSPACE" \
+              -maxdepth 1 \
+              -type f \
+              -regextype posix-extended \
+              -regex '.*/[^/]+\.[0-9]{3}$' |
+              sort -V
+          )
 
-          for name in os.listdir("."):
-              match = re.search(r'\.(\d{3})$', name)
+          for PART in "${PARTS[@]}"; do
+            cat "$PART" >> "$OUTPUT"
+          done
 
-              if match:
-                  number = int(match.group(1))
+          echo "Tamanho do ZIP:"
+          ls -lh "$OUTPUT"
 
-                  if 1 <= number <= 18:
-                      parts[number] = name
+          echo "Verificando integridade..."
 
-          output = "source/ZalithLauncher2.zip"
+          if ! unzip -t "$OUTPUT"; then
+            echo "::error::O ZIP reconstruído está inválido. Verifique se os 18 arquivos são partes binárias sequenciais do mesmo ZIP."
+            exit 1
+          fi
 
-          with open(output, "wb") as result:
-              for number in range(1, 19):
-                  filename = parts[number]
+          echo "ZIP validado."
 
-                  print("Reconstruindo:", filename)
-
-                  with open(filename, "rb") as part:
-                      while True:
-                          data = part.read(1024 * 1024)
-
-                          if not data:
-                              break
-
-                          result.write(data)
-
-          if not zipfile.is_zipfile(output):
-              print("ERRO: ZIP reconstruído inválido.")
-              sys.exit(1)
-
-          with zipfile.ZipFile(output) as archive:
-              bad_file = archive.testzip()
-
-              if bad_file:
-                  print("ZIP corrompido:", bad_file)
-                  sys.exit(1)
-
-              archive.extractall("extracted")
-
-          print("Projeto extraído com sucesso.")
-          PY
-
-      # ==========================================
-      # 4. LOCALIZAR O PROJETO GRADLE
-      # ==========================================
-
-      - name: Localizar projeto Gradle
+      # --------------------------------------------------
+      # 4. EXTRAIR O CÓDIGO-FONTE
+      # --------------------------------------------------
+      - name: Extrair código-fonte
         shell: bash
         run: |
           set -euo pipefail
 
-          GRADLEW=$(find extracted -type f -name gradlew -print -quit)
+          unzip -q \
+            "$GITHUB_WORKSPACE/source/ZalithLauncher2.zip" \
+            -d "$GITHUB_WORKSPACE/extracted"
+
+          echo "Conteúdo extraído:"
+          find "$GITHUB_WORKSPACE/extracted" \
+            -maxdepth 3 \
+            -type f |
+            head -100
+
+      # --------------------------------------------------
+      # 5. LOCALIZAR O PROJETO GRADLE
+      # --------------------------------------------------
+      - name: Localizar projeto Android
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          GRADLEW=""
+
+          while IFS= read -r FILE; do
+            DIR="$(dirname "$FILE")"
+
+            if [ -f "$DIR/settings.gradle" ] || \
+               [ -f "$DIR/settings.gradle.kts" ]; then
+              GRADLEW="$FILE"
+              break
+            fi
+          done < <(
+            find "$GITHUB_WORKSPACE/extracted" \
+              -type f \
+              -name gradlew
+          )
 
           if [ -z "$GRADLEW" ]; then
-            echo "ERRO: gradlew não encontrado."
-            find extracted -maxdepth 5 -type f | head -150
+            echo "::error::Não foi encontrado gradlew junto com settings.gradle ou settings.gradle.kts."
+            echo "Arquivos encontrados:"
+            find "$GITHUB_WORKSPACE/extracted" -maxdepth 5 -type f | head -200
             exit 1
           fi
 
-          PROJECT_DIR="$(realpath "$(dirname "$GRADLEW")")"
+          PROJECT_DIR="$(dirname "$GRADLEW")"
 
-          if [ ! -f "$PROJECT_DIR/settings.gradle" ] && \
-             [ ! -f "$PROJECT_DIR/settings.gradle.kts" ]; then
-            echo "ERRO: settings.gradle não encontrado."
-            exit 1
-          fi
-
-          chmod +x "$PROJECT_DIR/gradlew"
+          chmod +x "$GRADLEW"
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Projeto localizado:"
+          echo "Projeto encontrado:"
           echo "$PROJECT_DIR"
 
           ls -la "$PROJECT_DIR"
 
-      # ==========================================
-      # 5. INSTALAR JAVA
-      # ==========================================
-
-      - name: Instalar Java 21
-        uses: actions/setup-java@v4
+      # --------------------------------------------------
+      # 6. CONFIGURAR JAVA 21
+      # --------------------------------------------------
+      - name: Configurar Java 21
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '21'
+          cache: gradle
+          cache-dependency-path: |
+            extracted/**/gradle/wrapper/gradle-wrapper.properties
+            extracted/**/*.gradle
+            extracted/**/*.gradle.kts
+            extracted/**/gradle.properties
 
-      # ==========================================
-      # 6. INSTALAR ANDROID COMMAND-LINE TOOLS 16.0
-      # ==========================================
+      - name: Verificar Java
+        shell: bash
+        run: |
+          java -version
+          javac -version
+          echo "JAVA_HOME=$JAVA_HOME"
 
-      - name: Instalar Android SDK Command-line Tools 16.0
+      # --------------------------------------------------
+      # 7. INSTALAR ANDROID COMMAND LINE TOOLS
+      # --------------------------------------------------
+      - name: Instalar Android Command Line Tools 16
         shell: bash
         run: |
           set -euo pipefail
 
-          SDK_ROOT="/usr/local/lib/android/sdk"
-          TEMP_DIR="$RUNNER_TEMP/android-sdk-tools"
+          SDK_ROOT="$ANDROID_HOME"
+          CMD_DIR="$SDK_ROOT/cmdline-tools"
+          TEMP_DIR="$RUNNER_TEMP/android-command-tools"
 
+          mkdir -p "$CMD_DIR"
           mkdir -p "$TEMP_DIR"
-          mkdir -p "$SDK_ROOT/cmdline-tools"
 
-          echo "Baixando Command-line Tools 16.0..."
+          cd "$TEMP_DIR"
 
-          curl -fL --retry 5 --retry-delay 3 \
+          curl -fL --retry 3 \
             "https://dl.google.com/android/repository/commandlinetools-linux-12266719_latest.zip" \
-            -o "$TEMP_DIR/commandline-tools.zip"
+            -o commandlinetools.zip
 
-          echo "Extraindo ferramentas..."
+          unzip -q commandlinetools.zip
 
-          unzip -q -o "$TEMP_DIR/commandline-tools.zip" \
-            -d "$TEMP_DIR"
+          rm -rf "$CMD_DIR/latest"
+          mkdir -p "$CMD_DIR/latest"
 
-          if [ ! -f "$TEMP_DIR/cmdline-tools/bin/sdkmanager" ]; then
-            echo "ERRO: sdkmanager não encontrado."
+          mv cmdline-tools/* "$CMD_DIR/latest/"
+
+          echo "Android SDK instalado:"
+          ls -la "$CMD_DIR/latest"
+
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          echo "$CMD_DIR/latest/bin" >> "$GITHUB_PATH"
+
+      # --------------------------------------------------
+      # 8. CONFIGURAR SDK MANAGER
+      # --------------------------------------------------
+      - name: Configurar Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+
+          if [ ! -f "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager não encontrado."
             exit 1
           fi
 
-          rm -rf "$SDK_ROOT/cmdline-tools/latest"
-
-          mv "$TEMP_DIR/cmdline-tools" \
-            "$SDK_ROOT/cmdline-tools/latest"
-
-          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
-
           chmod +x "$SDKMANAGER"
 
-          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
-          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
-          echo "$SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
-
-          echo "Versão instalada:"
+          echo "Verificando SDK Manager:"
           "$SDKMANAGER" --version
 
-          echo "Aceitando licenças..."
+          mkdir -p "$HOME/.android"
+          touch "$HOME/.android/repositories.cfg"
 
           yes | "$SDKMANAGER" \
-            --sdk_root="$SDK_ROOT" \
+            --sdk_root="$ANDROID_HOME" \
             --licenses || true
 
-      # ==========================================
-      # 7. INSTALAR ANDROID PLATFORM 37.2 E NDK
-      # ==========================================
-
-      - name: Instalar Android Platform 37.2 e NDK
+      # --------------------------------------------------
+      # 9. INSTALAR ANDROID API 37.2 E NDK
+      # --------------------------------------------------
+      - name: Instalar Android SDK 37.2 e NDK
         shell: bash
         run: |
           set -euo pipefail
 
-          SDK_ROOT="/usr/local/lib/android/sdk"
-          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
 
-          echo "Consultando pacotes oficiais..."
+          echo "Consultando pacotes disponíveis..."
 
           "$SDKMANAGER" \
-            --sdk_root="$SDK_ROOT" \
+            --sdk_root="$ANDROID_HOME" \
             --list > "$RUNNER_TEMP/android-packages.txt"
-
-          echo "Verificando Android Platform 37.2..."
 
           if ! grep -Fq "platforms;android-37.2" \
             "$RUNNER_TEMP/android-packages.txt"; then
 
-            echo "ERRO: Android Platform 37.2 não está disponível."
-            echo "Pacotes Android 37 encontrados:"
-            grep -F "platforms;android-37" \
-              "$RUNNER_TEMP/android-packages.txt" || true
+            echo "::error::O pacote platforms;android-37.2 não apareceu na lista do SDK Manager."
+            echo "Pacotes de plataforma disponíveis:"
+            grep -E 'platforms;android-' \
+              "$RUNNER_TEMP/android-packages.txt" |
+              tail -30 || true
+
             exit 1
           fi
 
-          echo "Android Platform 37.2 encontrada."
-
-          echo "Instalando componentes..."
-
-          "$SDKMANAGER" \
-            --sdk_root="$SDK_ROOT" \
+          yes | "$SDKMANAGER" \
+            --sdk_root="$ANDROID_HOME" \
             "platform-tools" \
             "platforms;android-37.2" \
             "ndk;25.2.9519653"
 
-          echo "Verificando instalação..."
+          echo "Instalação concluída."
 
-          test -d "$SDK_ROOT/platforms/android-37.2"
-          test -d "$SDK_ROOT/ndk/25.2.9519653"
-
-          echo "ANDROID_NDK_HOME=$SDK_ROOT/ndk/25.2.9519653" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=$SDK_ROOT/ndk/25.2.9519653" >> "$GITHUB_ENV"
-
-          echo "Android Platform 37.2 instalada."
-          echo "NDK 25.2.9519653 instalado."
-
-          ls -la "$SDK_ROOT/platforms"
-          ls -la "$SDK_ROOT/ndk"
-
-      # ==========================================
-      # 8. VERIFICAR AMBIENTE
-      # ==========================================
-
-      - name: Verificar Java e Android SDK
+      # --------------------------------------------------
+      # 10. VERIFICAR SDK E NDK
+      # --------------------------------------------------
+      - name: Verificar Android SDK e NDK
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "========== JAVA =========="
-          java -version
+          echo "Android SDK:"
+          ls -la "$ANDROID_HOME"
 
-          echo "========== SDKMANAGER =========="
-          sdkmanager --version
+          echo
+          echo "Plataforma Android:"
+          ls -la "$ANDROID_HOME/platforms"
 
-          echo "========== ANDROID SDK =========="
-          echo "$ANDROID_HOME"
+          echo
+          echo "NDK:"
+          ls -la "$ANDROID_HOME/ndk/25.2.9519653"
 
-          echo "========== ANDROID PLATFORM =========="
-          ls -la "$ANDROID_HOME/platforms/android-37.2"
+          echo
+          echo "Build Tools disponíveis:"
+          ls -la "$ANDROID_HOME/build-tools" || true
 
-          echo "========== ANDROID NDK =========="
-          ls -la "$ANDROID_NDK_HOME"
-
-          echo "========== ADB =========="
-          adb version
-
-      # ==========================================
-      # 9. VERIFICAR MÓDULOS GRADLE
-      # ==========================================
-
-      - name: Identificar módulos Gradle
+      # --------------------------------------------------
+      # 11. VERIFICAR PROJETOS GRADLE
+      # --------------------------------------------------
+      - name: Verificar estrutura Gradle
         shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -euo pipefail
 
-          cd "$PROJECT_DIR"
+          echo "Diretório:"
+          pwd
 
+          echo "Arquivos Gradle:"
+          ls -la
+
+          echo "Projetos:"
           ./gradlew projects \
             --no-daemon \
             --stacktrace
 
-      # ==========================================
-      # 10. COMPILAR APK DEBUG
-      # ==========================================
-
+      # --------------------------------------------------
+      # 12. COMPILAR APK DEBUG
+      # --------------------------------------------------
       - name: Compilar APK Debug
         shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set +e
+          set -o pipefail
 
-          cd "$PROJECT_DIR"
-
-          LOG="$GITHUB_WORKSPACE/gradle-build.log"
-
-          echo "======================================"
+          echo "========================================"
           echo "COMPILANDO ZALITH LAUNCHER 2"
-          echo "======================================"
+          echo "========================================"
 
+          echo "Java:"
           java -version
 
-          echo "Android SDK: $ANDROID_HOME"
-          echo "Android NDK: $ANDROID_NDK_HOME"
+          echo "Gradle:"
+          ./gradlew --version
 
-          set -o pipefail
+          echo "Iniciando assembleDebug..."
 
           ./gradlew assembleDebug \
             -Darch=all \
             --no-daemon \
             --stacktrace \
-            --info \
-            2>&1 | tee "$LOG"
+            --info 2>&1 |
+            tee "$BUILD_LOG"
 
           BUILD_STATUS=${PIPESTATUS[0]}
 
-          echo "======================================"
-          echo "RESULTADO DA COMPILAÇÃO"
-          echo "======================================"
-
           if [ "$BUILD_STATUS" -ne 0 ]; then
-            echo "COMPILAÇÃO FALHOU."
-            tail -n 200 "$LOG"
-          else
-            echo "COMPILAÇÃO CONCLUÍDA."
+            echo
+            echo "========================================"
+            echo "FALHA NA COMPILAÇÃO"
+            echo "========================================"
+
+            echo "Últimas 200 linhas:"
+            tail -n 200 "$BUILD_LOG"
+
+            exit "$BUILD_STATUS"
           fi
 
-          exit "$BUILD_STATUS"
+          echo "Compilação Gradle concluída."
 
-      # ==========================================
-      # 11. SALVAR LOG MESMO SE FALHAR
-      # ==========================================
-
-      - name: Salvar log completo do Gradle
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ZalithLauncher2-Gradle-Log
-          path: gradle-build.log
-          if-no-files-found: warn
-          retention-days: 7
-
-      # ==========================================
-      # 12. VERIFICAR APK
-      # ==========================================
-
-      - name: Verificar APK gerado
+      # --------------------------------------------------
+      # 13. LOCALIZAR APK GERADO
+      # --------------------------------------------------
+      - name: Verificar APK Debug
+        if: success()
         shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -euo pipefail
 
           echo "Procurando APKs..."
 
-          find "$PROJECT_DIR" \
+          find . \
             -type f \
-            -path "*/build/outputs/apk/*/*.apk" \
+            -path '*/build/outputs/apk/debug/*.apk' \
             -print
 
-          APK_COUNT=$(find "$PROJECT_DIR" \
+          APK_COUNT=$(find . \
             -type f \
-            -path "*/build/outputs/apk/*/*.apk" | wc -l)
+            -path '*/build/outputs/apk/debug/*.apk' |
+            wc -l)
 
           if [ "$APK_COUNT" -eq 0 ]; then
-            echo "ERRO: nenhum APK foi gerado."
+            echo "::error::A compilação terminou, mas nenhum APK Debug foi encontrado."
             exit 1
           fi
 
-          echo "APKs encontrados: $APK_COUNT"
+          mkdir -p "$GITHUB_WORKSPACE/apk-output"
 
-      # ==========================================
-      # 13. DISPONIBILIZAR APK
-      # ==========================================
+          while IFS= read -r APK; do
+            cp "$APK" "$GITHUB_WORKSPACE/apk-output/"
+          done < <(
+            find . \
+              -type f \
+              -path '*/build/outputs/apk/debug/*.apk'
+          )
 
-      - name: Enviar APK para download
-        uses: actions/upload-artifact@v4
+          echo "APKs encontrados:"
+          ls -lh "$GITHUB_WORKSPACE/apk-output"
+
+      # --------------------------------------------------
+      # 14. ENVIAR LOGS MESMO SE A COMPILAÇÃO FALHAR
+      # --------------------------------------------------
+      - name: Salvar logs da compilação
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ZalithLauncher2-Gradle-Log
+          path: |
+            gradle-build.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      # --------------------------------------------------
+      # 15. ENVIAR APK DEBUG
+      # --------------------------------------------------
+      - name: Enviar APK Debug
+        if: success()
+        uses: actions/upload-artifact@v7
         with:
           name: ZalithLauncher2-APK
-          path: extracted/**/build/outputs/apk/debug/*.apk
+          path: apk-output/*.apk
           if-no-files-found: error
           retention-days: 30
+
+      # --------------------------------------------------
+      # 16. RESUMO FINAL
+      # --------------------------------------------------
+      - name: Resumo da construção
+        if: always()
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "RESUMO - ZALITH LAUNCHER 2"
+          echo "========================================"
+
+          echo "Sistema: Ubuntu 24.04"
+          echo "Java: 21"
+          echo "Android SDK: 37.2"
+          echo "NDK: 25.2.9519653"
+
+          if [ -d "$GITHUB_WORKSPACE/apk-output" ]; then
+            echo
+            echo "Arquivos APK:"
+            ls -lh "$GITHUB_WORKSPACE/apk-output"
+          else
+            echo
+            echo "Nenhum APK foi produzido."
+          fi
+
+          echo
+          echo "Consulte os artefatos da execução para baixar o APK e os logs."
           
