@@ -23,39 +23,26 @@ jobs:
 
     steps:
 
-      # ================================================
-      # 1. BAIXAR O REPOSITÓRIO
-      # ================================================
-      - name: Baixar código do repositório
+      # 1. BAIXAR REPOSITÓRIO
+      - name: Baixar código
         uses: actions/checkout@v7
 
       - name: Informações do ambiente
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "======================================"
           echo "CONSTRUÇÃO DO ZALITH LAUNCHER 2"
-          echo "======================================"
-
           lsb_release -a
-          echo
           uname -a
-          echo
           df -h
 
-      # ================================================
-      # 2. LOCALIZAR E VALIDAR OS 18 ARQUIVOS
-      # ================================================
-      - name: Verificar os 18 pedaços do código-fonte
+      # 2. VERIFICAR OS 18 ARQUIVOS
+      - name: Verificar os 18 pedaços
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p "$GITHUB_WORKSPACE/source"
-          mkdir -p "$GITHUB_WORKSPACE/extracted"
-
-          echo "Procurando pedaços .001 até .018..."
+          mkdir -p source extracted
 
           for NUMBER in $(seq 1 18); do
             SUFFIX=$(printf '%03d' "$NUMBER")
@@ -64,39 +51,24 @@ jobs:
               find "$GITHUB_WORKSPACE" \
                 -maxdepth 1 \
                 -type f \
-                -name "*.${SUFFIX}" \
-                -print
+                -name "*.${SUFFIX}"
             )
 
             if [ "${#MATCHES[@]}" -ne 1 ]; then
-              echo "::error::Esperado exatamente um arquivo terminado em .$SUFFIX; encontrados ${#MATCHES[@]}."
-
-              echo "Arquivos encontrados:"
-              find "$GITHUB_WORKSPACE" \
-                -maxdepth 1 \
-                -type f \
-                -printf '%f\n' |
-                sort
-
+              echo "::error::Esperado um arquivo .$SUFFIX; encontrados ${#MATCHES[@]}."
               exit 1
             fi
 
-            echo "OK $SUFFIX: ${MATCHES[0]}"
+            echo "OK: ${MATCHES[0]}"
           done
 
-          echo
-          echo "Todos os 18 pedaços foram encontrados."
-
-      # ================================================
-      # 3. RECONSTRUIR ZIP NA ORDEM NUMÉRICA
-      # ================================================
-      - name: Reconstruir arquivo ZIP original
+      # 3. RECONSTRUIR ZIP
+      - name: Reconstruir ZIP
         shell: bash
         run: |
           set -euo pipefail
 
           OUTPUT="$GITHUB_WORKSPACE/source/ZalithLauncher2.zip"
-
           rm -f "$OUTPUT"
           touch "$OUTPUT"
 
@@ -107,59 +79,34 @@ jobs:
               find "$GITHUB_WORKSPACE" \
                 -maxdepth 1 \
                 -type f \
-                -name "*.${SUFFIX}" \
-                -print
+                -name "*.${SUFFIX}"
             )
 
             if [ "${#MATCHES[@]}" -ne 1 ]; then
-              echo "::error::Erro ao localizar o pedaço .$SUFFIX."
+              echo "::error::Pedaço .$SUFFIX não localizado."
               exit 1
             fi
 
-            PART="${MATCHES[0]}"
-
-            echo "Concatenando pedaço .$SUFFIX: $(basename "$PART")"
-
-            cat "$PART" >> "$OUTPUT"
+            echo "Adicionando ${MATCHES[0]}"
+            cat "${MATCHES[0]}" >> "$OUTPUT"
           done
 
-          echo
-          echo "ZIP reconstruído:"
           ls -lh "$OUTPUT"
 
-          echo "Verificando integridade do ZIP..."
+          unzip -t "$OUTPUT"
 
-          if ! unzip -t "$OUTPUT"; then
-            echo "::error::O arquivo reconstruído não passou na validação ZIP."
-            echo "Verifique se os 18 arquivos são partes binárias sequenciais do mesmo ZIP."
-            exit 1
-          fi
-
-          echo "ZIP válido."
-
-      # ================================================
-      # 4. EXTRAIR O PROJETO
-      # ================================================
+      # 4. EXTRAIR CÓDIGO
       - name: Extrair código-fonte
         shell: bash
         run: |
           set -euo pipefail
 
-          unzip -q \
-            "$GITHUB_WORKSPACE/source/ZalithLauncher2.zip" \
-            -d "$GITHUB_WORKSPACE/extracted"
+          unzip -q source/ZalithLauncher2.zip -d extracted
 
           echo "Extração concluída."
+          find extracted -maxdepth 3 -type f | head -150
 
-          echo "Estrutura do projeto:"
-          find "$GITHUB_WORKSPACE/extracted" \
-            -maxdepth 3 \
-            -type f |
-            head -150
-
-      # ================================================
-      # 5. LOCALIZAR GRADLEW
-      # ================================================
+      # 5. LOCALIZAR GRADLE
       - name: Localizar projeto Gradle
         shell: bash
         run: |
@@ -175,20 +122,10 @@ jobs:
               GRADLEW="$FILE"
               break
             fi
-          done < <(
-            find "$GITHUB_WORKSPACE/extracted" \
-              -type f \
-              -name gradlew
-          )
+          done < <(find extracted -type f -name gradlew)
 
           if [ -z "$GRADLEW" ]; then
-            echo "::error::Não foi encontrado gradlew junto com settings.gradle."
-
-            find "$GITHUB_WORKSPACE/extracted" \
-              -maxdepth 5 \
-              -type f |
-              head -250
-
+            echo "::error::gradlew não encontrado."
             exit 1
           fi
 
@@ -198,14 +135,10 @@ jobs:
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Projeto localizado:"
-          echo "$PROJECT_DIR"
-
+          echo "Projeto: $PROJECT_DIR"
           ls -la "$PROJECT_DIR"
 
-      # ================================================
-      # 6. CONFIGURAR JAVA 21
-      # ================================================
+      # 6. JAVA 21
       - name: Configurar Java 21
         uses: actions/setup-java@v6
         with:
@@ -221,16 +154,10 @@ jobs:
       - name: Verificar Java
         shell: bash
         run: |
-          set -euo pipefail
-
           java -version
           javac -version
 
-          echo "JAVA_HOME=$JAVA_HOME"
-
-      # ================================================
-      # 7. INSTALAR ANDROID COMMAND LINE TOOLS
-      # ================================================
+      # 7. COMMAND LINE TOOLS
       - name: Instalar Android Command Line Tools 16
         shell: bash
         run: |
@@ -240,9 +167,7 @@ jobs:
           CMD_DIR="$SDK_ROOT/cmdline-tools"
           TEMP_DIR="$RUNNER_TEMP/android-command-tools"
 
-          mkdir -p "$CMD_DIR"
-          mkdir -p "$TEMP_DIR"
-
+          mkdir -p "$CMD_DIR" "$TEMP_DIR"
           cd "$TEMP_DIR"
 
           curl -fL --retry 3 \
@@ -261,53 +186,62 @@ jobs:
 
           echo "Command Line Tools instalados."
 
-      # ================================================
-      # 8. CONFIGURAR SDK MANAGER
-      # ================================================
-      - name: Configurar Android SDK Manager
+      # 8. ACEITAR LICENÇAS SEM FALSO ERRO DE BROKEN PIPE
+      - name: Aceitar licenças Android
         shell: bash
         run: |
           set -euo pipefail
 
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-
-          if [ ! -f "$SDKMANAGER" ]; then
-            echo "::error::SDK Manager não encontrado."
-            exit 1
-          fi
-
-          chmod +x "$SDKMANAGER"
 
           mkdir -p "$HOME/.android"
           touch "$HOME/.android/repositories.cfg"
 
+          echo "Verificando SDK Manager:"
           "$SDKMANAGER" --version
 
+          echo "Aceitando licenças Android..."
+
+          set +e
           yes | "$SDKMANAGER" \
             --sdk_root="$ANDROID_HOME" \
-            --licenses || true
+            --licenses
 
-      # ================================================
-      # 9. INSTALAR SDK 37.2 E NDK
-      # ================================================
-      - name: Instalar Android SDK 37.2 e NDK 25
+          STATUS=("${PIPESTATUS[@]}")
+          set -e
+
+          YES_STATUS="${STATUS[0]}"
+          SDK_STATUS="${STATUS[1]}"
+
+          echo "Código do yes: $YES_STATUS"
+          echo "Código do SDK Manager: $SDK_STATUS"
+
+          if [ "$SDK_STATUS" -ne 0 ]; then
+            echo "::error::O SDK Manager falhou ao processar as licenças."
+            exit "$SDK_STATUS"
+          fi
+
+          echo "Licenças processadas pelo SDK Manager."
+
+      # 9. CONSULTAR PACOTES
+      - name: Consultar pacotes Android
         shell: bash
         run: |
           set -euo pipefail
 
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-
-          echo "Consultando pacotes disponíveis..."
 
           "$SDKMANAGER" \
             --sdk_root="$ANDROID_HOME" \
             --list \
             > "$RUNNER_TEMP/android-packages.txt"
 
+          echo "Pacotes Android encontrados."
+
           if ! grep -Fq "platforms;android-37.2" \
             "$RUNNER_TEMP/android-packages.txt"; then
 
-            echo "::error::Não foi encontrado platforms;android-37.2."
+            echo "::error::platforms;android-37.2 não está disponível."
 
             grep -E 'platforms;android-' \
               "$RUNNER_TEMP/android-packages.txt" |
@@ -316,40 +250,50 @@ jobs:
             exit 1
           fi
 
-          yes | "$SDKMANAGER" \
+      # 10. INSTALAR SDK E NDK SEM PIPE YES
+      - name: Instalar Android SDK 37.2 e NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+
+          echo "Instalando platform-tools..."
+          "$SDKMANAGER" \
             --sdk_root="$ANDROID_HOME" \
-            "platform-tools" \
-            "platforms;android-37.2" \
-            "ndk;25.2.9519653"
+            --install "platform-tools"
 
-          echo "SDK e NDK instalados."
+          echo "Instalando Android 37.2..."
+          "$SDKMANAGER" \
+            --sdk_root="$ANDROID_HOME" \
+            --install "platforms;android-37.2"
 
-      # ================================================
-      # 10. VERIFICAR SDK E NDK
-      # ================================================
+          echo "Instalando NDK 25.2.9519653..."
+          "$SDKMANAGER" \
+            --sdk_root="$ANDROID_HOME" \
+            --install "ndk;25.2.9519653"
+
+          echo "Instalação dos pacotes concluída."
+
+      # 11. VERIFICAR SDK E NDK
       - name: Verificar instalações Android
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Android SDK:"
-          ls -la "$ANDROID_HOME"
+          test -d "$ANDROID_HOME/platforms/android-37.2"
+          test -d "$ANDROID_HOME/ndk/25.2.9519653"
 
-          echo
-          echo "Plataformas:"
+          echo "Plataforma Android:"
           ls -la "$ANDROID_HOME/platforms"
 
-          echo
           echo "NDK:"
           ls -la "$ANDROID_HOME/ndk/25.2.9519653"
 
-          echo
           echo "Build Tools:"
           ls -la "$ANDROID_HOME/build-tools" || true
 
-      # ================================================
-      # 11. VERIFICAR PROJETOS GRADLE
-      # ================================================
+      # 12. VERIFICAR GRADLE
       - name: Verificar estrutura Gradle
         shell: bash
         working-directory: ${{ env.PROJECT_DIR }}
@@ -359,18 +303,13 @@ jobs:
           echo "Diretório:"
           pwd
 
-          echo "Arquivos:"
           ls -la
-
-          echo "Projetos Gradle:"
 
           ./gradlew projects \
             --no-daemon \
             --stacktrace
 
-      # ================================================
-      # 12. COMPILAR APK DEBUG
-      # ================================================
+      # 13. COMPILAR APK
       - name: Compilar APK Debug
         shell: bash
         working-directory: ${{ env.PROJECT_DIR }}
@@ -380,17 +319,12 @@ jobs:
 
           BUILD_LOG="$GITHUB_WORKSPACE/gradle-build.log"
 
-          echo "======================================"
+          echo "=================================="
           echo "COMPILANDO ZALITH LAUNCHER 2"
-          echo "======================================"
+          echo "=================================="
 
-          echo "Java:"
           java -version
-
-          echo "Gradle:"
           ./gradlew --version
-
-          echo "Executando assembleDebug..."
 
           ./gradlew assembleDebug \
             -Darch=all \
@@ -402,21 +336,14 @@ jobs:
           BUILD_STATUS=${PIPESTATUS[0]}
 
           if [ "$BUILD_STATUS" -ne 0 ]; then
-            echo
-            echo "======================================"
-            echo "ERRO NA COMPILAÇÃO"
-            echo "======================================"
-
+            echo "FALHA NA COMPILAÇÃO"
             tail -n 200 "$BUILD_LOG"
-
             exit "$BUILD_STATUS"
           fi
 
-          echo "Gradle terminou sem reportar falha."
+          echo "Compilação concluída."
 
-      # ================================================
-      # 13. LOCALIZAR APK DEBUG
-      # ================================================
+      # 14. LOCALIZAR APK
       - name: Verificar APK Debug
         if: success()
         shell: bash
@@ -424,13 +351,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Procurando APK Debug..."
-
           mapfile -t APKS < <(
             find . \
               -type f \
-              -path '*/build/outputs/apk/debug/*.apk' \
-              -print
+              -path '*/build/outputs/apk/debug/*.apk'
           )
 
           if [ "${#APKS[@]}" -eq 0 ]; then
@@ -441,17 +365,13 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/apk-output"
 
           for APK in "${APKS[@]}"; do
-            echo "APK encontrado: $APK"
+            echo "Copiando: $APK"
             cp "$APK" "$GITHUB_WORKSPACE/apk-output/"
           done
 
-          echo
-          echo "Arquivos finais:"
           ls -lh "$GITHUB_WORKSPACE/apk-output"
 
-      # ================================================
-      # 14. ENVIAR LOGS
-      # ================================================
+      # 15. ENVIAR LOGS
       - name: Salvar logs da compilação
         if: always()
         uses: actions/upload-artifact@v7
@@ -461,9 +381,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # ================================================
-      # 15. ENVIAR APK
-      # ================================================
+      # 16. ENVIAR APK
       - name: Enviar APK Debug
         if: success()
         uses: actions/upload-artifact@v7
@@ -473,31 +391,23 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # ================================================
-      # 16. RESUMO FINAL
-      # ================================================
+      # 17. RESUMO
       - name: Resumo da construção
         if: always()
         shell: bash
         run: |
-          echo "======================================"
+          echo "=================================="
           echo "RESUMO ZALITH LAUNCHER 2"
-          echo "======================================"
+          echo "=================================="
 
-          echo "Sistema: Ubuntu 24.04"
+          echo "Ubuntu: 24.04"
           echo "Java: 21"
           echo "Android SDK: 37.2"
           echo "NDK: 25.2.9519653"
 
           if [ -d "$GITHUB_WORKSPACE/apk-output" ]; then
-            echo
-            echo "APKs:"
             ls -lh "$GITHUB_WORKSPACE/apk-output"
           else
-            echo
             echo "APK não gerado."
           fi
-
-          echo
-          echo "Consulte os artefatos da execução."
           
